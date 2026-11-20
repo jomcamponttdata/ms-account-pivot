@@ -1,0 +1,160 @@
+@startuml 09-sequence-account-service
+title account-service - Diagrama de secuencia
+
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+
+actor "Cliente\n(Postman)" as User
+participant "AccountController\n(inbound adapter)" as Controller
+participant "AccountCommandService" as Cmd
+participant "AccountOperationService" as Op
+participant "AccountQueryService" as Qry
+participant "PolicyFactory /\nOperationRuleFactory" as Factory
+participant "Strategy\n(Policy / Rule)" as Strategy
+participant "AccountRepositoryPort\n+ R2dbcAdapter" as Repo
+participant "CustomerQueryPort\n+ WebClientAdapter" as CustGw
+participant "MovementGatewayPort\n+ WebClientAdapter" as MovGw
+database "PostgreSQL\naccount_db" as DB
+participant "customer-service" as CustSvc
+participant "transaction-service" as TxSvc
+
+== 1. Abrir cuenta (POST /api/v1/accounts) ==
+User -> Controller : POST /accounts {accountType, holders, currency, ...}
+Controller -> Cmd : create(command)
+loop por cada holderId recibido
+  Cmd -> CustGw : findById(holderId)
+  CustGw -> CustSvc : GET /customers/{holderId}
+  CustSvc --> CustGw : cliente (tipo, estado)
+  CustGw --> Cmd : CustomerSnapshot
+end
+alt un titular no existe
+  Cmd --> Controller : ResourceNotFoundException
+  Controller --> User : 404 Not Found
+else algun titular esta INACTIVE
+  Cmd --> Controller : BusinessRuleViolationException
+  Controller --> User : 422 Unprocessable Entity
+else todos existen y estan activos
+  Cmd -> Repo : findByHolderIds(holderIds)
+  Repo -> DB : SELECT cuentas de todos los titulares
+  DB --> Repo : cuentas existentes
+  Repo --> Cmd : cuentas existentes por titular
+  Cmd -> Factory : get(customerType / holder types)
+  Factory --> Cmd : Personal / BusinessAccountCreationPolicy
+  Cmd -> Strategy : validate(account, all holders, existingAccounts)
+  alt tipos de titular o reglas de apertura no validos
+    Strategy --> Cmd : BusinessRuleViolationException
+    Cmd --> Controller : error
+    Controller --> User : 422 Unprocessable Entity
+  else reglas validas
+    Cmd -> Repo : save(account with balance zero)
+    Repo -> DB : INSERT cuenta + titulares + firmantes
+    note right of DB
+      Restricciones unicas respaldan las reglas de
+      titularidad/producto ante altas concurrentes.
+      La colision se traduce a 422.
+    end note
+    DB --> Repo : OK / unique constraint violation
+    alt conflicto de restriccion unica
+      Repo --> Cmd : DuplicateProductException
+      Cmd --> Controller : error
+      Controller --> User : 422 Unprocessable Entity
+    else cuenta guardada
+      Repo --> Cmd : Single<Account>
+      Cmd --> Controller : Single<Account>
+      Controller --> User : 201 Created + Location
+    end
+  end
+end
+
+== 2. Depositar (POST /api/v1/accounts/{id}/deposits) ==
+User -> Controller : POST /accounts/{id}/deposits\n{amount, currency, description}
+Controller -> Op : deposit(operationCommand)
+Op -> Repo : findById(accountId)
+Repo -> DB : SELECT
+DB --> Repo : cuenta (contador mensual + version)
+Repo --> Op : Maybe<Account>
+alt cuenta no existe
+  Op --> Controller : ResourceNotFoundException
+  Controller --> User : 404 Not Found
+else cuenta existe
+  Op -> Factory : get(accountType)
+  Factory --> Op : Savings / Checking / FixedTermOperationRule
+  Op -> Strategy : validate(account, DEPOSIT, amount, today)
+  alt regla no se cumple
+    Strategy --> Op : BusinessRuleViolationException
+    Op --> Controller : error
+    Controller --> User : 422 Unprocessable Entity
+  else regla se cumple
+    Op -> Op : account.deposit(amount)\naccount.registerMovement(today)
+    Op -> Repo : save(account)
+    Repo -> DB : UPDATE cuenta WHERE version = ?
+    alt version desactualizada
+      DB --> Repo : conflicto de concurrencia
+      Repo --> Op : ConcurrentModificationException
+      Op --> Controller : error
+      Controller --> User : 409 Conflict
+    else saldo guardado
+      DB --> Repo : OK
+      Repo --> Op : Single<Account>
+      Op -> MovGw : register(movementCommand)
+      MovGw -> TxSvc : POST /api/v1/movements
+      alt movimiento registrado
+        TxSvc --> MovGw : 201 Created + Movement
+        MovGw --> Op : MovementReceipt
+        Op --> Controller : MovementReceipt
+        Controller --> User : 201 Created
+      else fallo confirmado del registro
+        TxSvc --> MovGw : error definitivo
+        MovGw --> Op : error
+        Op -> Op : account.compensate(DEPOSIT, amount)
+        Op -> Repo : restoreAfterFailedMovement(previousState, version)
+        Repo -> DB : UPDATE compensatorio con control de version
+        DB --> Repo : OK / conflicto de concurrencia
+        note right of Repo
+          Si otra operacion modifico la cuenta primero,
+          no sobrescribirla: requiere reconciliacion.
+        end note
+        Op --> Controller : error
+        Controller --> User : 503 Service Unavailable
+      else timeout de resultado ambiguo
+        MovGw --> Op : timeout; movimiento posiblemente guardado
+        note right of Op
+          No compensar automaticamente: reconciliar el
+          movimiento antes de decidir el estado final.
+        end note
+        Op --> Controller : resultado indeterminado
+        Controller --> User : 503 Service Unavailable
+      end
+    end
+  end
+end
+
+== 3. Retirar (POST /api/v1/accounts/{id}/withdrawals) ==
+User -> Controller : POST /accounts/{id}/withdrawals\n{amount, currency, description}
+Controller -> Op : withdraw(operationCommand)
+note over Op, MovGw
+  Mismos pasos que el deposito; ademas se valida saldo suficiente.
+  Se actualiza el saldo con bloqueo optimista y se registra
+  el movimiento. Fallo confirmado: compensacion local; timeout:
+  resultado ambiguo y reconciliacion.
+end note
+Op --> Controller : MovementReceipt / error
+Controller --> User : 201 Created / error HTTP correspondiente
+
+== 4. Consultar saldo (GET /api/v1/accounts/{id}/balance) ==
+User -> Controller : GET /accounts/{id}/balance
+Controller -> Qry : getBalance(accountId)
+Qry -> Repo : findById(accountId)
+Repo -> DB : SELECT
+DB --> Repo : cuenta
+Repo --> Qry : Maybe<Account>
+Qry --> Controller : Single<Balance>
+Controller --> User : 200 OK {balance, currency}
+
+note over User, TxSvc
+  Los demas CRUD (GET list paginado con page/size, GET by id, PUT, DELETE)
+  siguen el patron buscar -> validar -> guardar. PUT no cambia tipo ni saldo.
+  El historial de movimientos se consulta en transaction-service.
+end note
+
+@enduml

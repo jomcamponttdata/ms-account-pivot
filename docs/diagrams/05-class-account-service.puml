@@ -1,0 +1,264 @@
+@startuml 05-class-account-service
+title account-service - Diagrama de clases (hexagonal + Strategy)
+
+skinparam classAttributeIconSize 0
+skinparam shadowing false
+hide empty members
+
+' Nucleo: RxJava 3 | Infraestructura: Reactor (conversion en los adaptadores)
+
+package "domain" <<Rectangle>> {
+  class Account {
+    -id : UUID
+    -accountNumber : String
+    -accountType : AccountType
+    -balance : Money
+    -holders : List<UUID>
+    -authorizedSigners : List<AuthorizedSigner>
+    -maintenanceFee : Money
+    -maxMonthlyMovements : Integer
+    -allowedMovementDay : Integer
+    -movementsInCurrentMonth : int
+    -movementsPeriod : YearMonth
+    -version : Long
+    -createdAt : Instant
+    +deposit(Money)
+    +withdraw(Money)
+    +registerMovement(LocalDate)
+    +compensate(MovementType, Money)
+  }
+  class Money <<value object>> {
+    -amount : BigDecimal
+    -currency : String
+    +add(Money) : Money
+    +subtract(Money) : Money
+    +isGreaterThan(Money) : boolean
+  }
+  class AuthorizedSigner <<value object>> {
+    -fullName : String
+    -documentType : String
+    -documentNumber : String
+  }
+  class CustomerSnapshot <<value object>> {
+    -id : UUID
+    -customerType : CustomerType
+    -active : boolean
+  }
+  class MovementReceipt <<value object>> {
+    -movementId : String
+    -movementType : MovementType
+    -amount : Money
+    -createdAt : Instant
+  }
+  enum AccountType {
+    SAVINGS
+    CHECKING
+    FIXED_TERM
+  }
+  enum CustomerType {
+    PERSONAL
+    BUSINESS
+  }
+  enum MovementType {
+    DEPOSIT
+    WITHDRAWAL
+  }
+  class BusinessRuleViolationException
+  class ResourceNotFoundException
+  class ConcurrentModificationException
+  class DuplicateProductException
+}
+
+package "domain.strategy" <<Rectangle>> {
+  interface AccountCreationPolicy <<Strategy por CustomerType>> {
+    +supports(CustomerType) : boolean
+    +validate(Account, List<Account> existing) : Completable
+  }
+  class PersonalAccountCreationPolicy {
+    max 1 SAVINGS, max 1 CHECKING,
+    N FIXED_TERM, exactamente 1 titular
+  }
+  class BusinessAccountCreationPolicy {
+    solo CHECKING (N cuentas),
+    1..n titulares, 0..n firmantes
+  }
+  class AccountCreationPolicyFactory <<Factory>> {
+    +get(CustomerType) : AccountCreationPolicy
+  }
+
+  interface AccountOperationRule <<Strategy por AccountType>> {
+    +supports(AccountType) : boolean
+    +validate(Account, MovementType, Money, LocalDate) : Completable
+  }
+  class SavingsOperationRule {
+    limite de movimientos mensuales
+  }
+  class CheckingOperationRule {
+    sin limite de movimientos
+  }
+  class FixedTermOperationRule {
+    1 movimiento, solo el dia permitido
+  }
+  class AccountOperationRuleFactory <<Factory>> {
+    +get(AccountType) : AccountOperationRule
+  }
+}
+
+package "application.port.in" <<Rectangle>> {
+  interface CreateAccountUseCase {
+    +create(CreateAccountCommand) : Single<Account>
+  }
+  interface GetAccountsUseCase {
+    +findAll(AccountFilter, PageQuery) : Flowable<Account>
+    +findById(UUID) : Single<Account>
+  }
+  interface UpdateAccountUseCase {
+    +update(UUID, UpdateAccountCommand) : Single<Account>
+  }
+  interface DeleteAccountUseCase {
+    +delete(UUID) : Completable
+  }
+  interface GetBalanceUseCase {
+    +getBalance(UUID) : Single<Balance>
+  }
+  interface DepositUseCase {
+    +deposit(OperationCommand) : Single<MovementReceipt>
+  }
+  interface WithdrawUseCase {
+    +withdraw(OperationCommand) : Single<MovementReceipt>
+  }
+  class CreateAccountCommand <<record>>
+  class UpdateAccountCommand <<record>> {
+    holders, authorizedSigners,
+    maintenanceFee, maxMonthlyMovements,
+    allowedMovementDay
+    (sin accountType ni saldo)
+  }
+  class OperationCommand <<record>> {
+    accountId, amount : Money,
+    description
+  }
+  class AccountFilter <<record>>
+  class PageQuery <<record>>
+  class Balance <<record>>
+}
+
+package "application.port.out" <<Rectangle>> {
+  interface AccountRepositoryPort {
+    +save(Account) : Single<Account>
+    +findById(UUID) : Maybe<Account>
+    +findAll(AccountFilter, PageQuery) : Flowable<Account>
+    +findByHolderIds(List<UUID>) : Flowable<Account>
+    +deleteById(UUID) : Completable
+    +restoreAfterFailedMovement(Account, expectedVersion) : Single<Account>
+  }
+  interface CustomerQueryPort {
+    +findById(UUID) : Single<CustomerSnapshot>
+  }
+  interface MovementGatewayPort {
+    +register(MovementCommand) : Single<MovementReceipt>
+  }
+  class MovementCommand <<record>> {
+    productId, productType,
+    movementType, amount : Money,
+    description
+  }
+}
+
+package "application.service" <<Rectangle>> {
+  class AccountCommandService
+  class AccountQueryService
+  class AccountOperationService
+}
+
+package "infrastructure.adapter.in" <<Rectangle>> {
+  class AccountController <<inbound adapter>>
+  class AccountRestMapper
+  class GlobalExceptionHandler {
+    mapea errores a RFC 7807
+  }
+}
+
+package "infrastructure.adapter.out" <<Rectangle>> {
+  class R2dbcAccountRepositoryAdapter <<outbound adapter>> {
+    maneja @Version (bloqueo optimista)
+    transacciones reactivas para persistencia
+  }
+  interface AccountR2dbcRepository <<Spring Data R2DBC>>
+  class AccountEntity
+  class AccountHolderEntity
+  class AuthorizedSignerEntity
+  class WebClientCustomerAdapter <<outbound adapter>>
+  class WebClientMovementAdapter <<outbound adapter>>
+}
+
+' ---- Casos de uso implementados ----
+CreateAccountUseCase <|.. AccountCommandService
+UpdateAccountUseCase <|.. AccountCommandService
+DeleteAccountUseCase <|.. AccountCommandService
+GetAccountsUseCase <|.. AccountQueryService
+GetBalanceUseCase <|.. AccountQueryService
+DepositUseCase <|.. AccountOperationService
+WithdrawUseCase <|.. AccountOperationService
+
+' ---- Dependencias del nucleo (solo hacia puertos y estrategias) ----
+AccountCommandService ..> AccountRepositoryPort
+AccountCommandService ..> CustomerQueryPort
+AccountCommandService ..> AccountCreationPolicyFactory
+AccountQueryService ..> AccountRepositoryPort
+AccountOperationService ..> AccountRepositoryPort
+AccountOperationService ..> MovementGatewayPort
+AccountOperationService ..> AccountOperationRuleFactory
+
+' ---- Strategy ----
+AccountCreationPolicy <|.. PersonalAccountCreationPolicy
+AccountCreationPolicy <|.. BusinessAccountCreationPolicy
+AccountCreationPolicyFactory o-- AccountCreationPolicy
+AccountOperationRule <|.. SavingsOperationRule
+AccountOperationRule <|.. CheckingOperationRule
+AccountOperationRule <|.. FixedTermOperationRule
+AccountOperationRuleFactory o-- AccountOperationRule
+
+' ---- Adaptadores ----
+AccountRepositoryPort <|.. R2dbcAccountRepositoryAdapter
+CustomerQueryPort <|.. WebClientCustomerAdapter
+MovementGatewayPort <|.. WebClientMovementAdapter
+R2dbcAccountRepositoryAdapter ..> AccountR2dbcRepository
+R2dbcAccountRepositoryAdapter ..> AccountEntity
+R2dbcAccountRepositoryAdapter ..> AccountHolderEntity
+R2dbcAccountRepositoryAdapter ..> AuthorizedSignerEntity
+
+AccountController ..> CreateAccountUseCase
+AccountController ..> GetAccountsUseCase
+AccountController ..> UpdateAccountUseCase
+AccountController ..> DeleteAccountUseCase
+AccountController ..> GetBalanceUseCase
+AccountController ..> DepositUseCase
+AccountController ..> WithdrawUseCase
+AccountController ..> AccountRestMapper
+
+' ---- Dominio ----
+Account --> AccountType
+Account *-- Money
+Account "1" o-- "0..*" AuthorizedSigner
+CustomerSnapshot --> CustomerType
+MovementReceipt --> MovementType
+
+note bottom of R2dbcAccountRepositoryAdapter
+  Unique constraints back the personal-customer account limits.
+  Constraint violations are translated to DuplicateProductException
+  and returned as HTTP 422. @Version remains for concurrent balance
+  updates and is independent of movement-service registration.
+end note
+
+note bottom of Account
+  El contador mensual (movementsInCurrentMonth) y la
+  version viven en la cuenta: no se consulta a otro
+  servicio y se evitan carreras con depositos simultaneos.
+  Si el registro del movimiento falla de forma confirmada,
+  se intenta restaurar el estado anterior. Un timeout del
+  servicio remoto tiene resultado ambiguo y requiere
+  reconciliacion; no se compensa automaticamente.
+end note
+
+@enduml

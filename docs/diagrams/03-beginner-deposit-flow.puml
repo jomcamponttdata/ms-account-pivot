@@ -1,0 +1,114 @@
+@startuml 03-beginner-deposit-flow
+title Guia para principiantes: recorrido de un DEPOSITO por la arquitectura hexagonal
+
+skinparam shadowing false
+skinparam sequenceMessageAlign center
+autonumber
+
+actor "Cliente\n(Postman)" as User
+
+box "ADAPTADORES DE ENTRADA\n(traducen HTTP a casos de uso)" #E8F1FB
+  participant "AccountController\n(WebFlux)" as Controller
+end box
+
+box "NUCLEO DEL NEGOCIO\n(no conoce HTTP ni bases de datos)" #E9F7EC
+  participant "DepositUseCase\n(puerto de entrada)" as UseCase
+  participant "AccountOperationService\n(servicio de aplicacion)" as Service
+  participant "AccountOperationRule\n(Strategy elegida por Factory)" as Rule
+  participant "Account\n(dominio)" as Domain
+end box
+
+box "ADAPTADORES DE SALIDA\n(hablan con el mundo exterior)" #FFF4E0
+  participant "AccountRepositoryPort\n+ R2DBC" as Repo
+  participant "MovementGatewayPort\n+ WebClient" as MovGw
+end box
+
+database "PostgreSQL\naccount_db" as DB
+participant "transaction-service\n(MongoDB)" as TxSvc
+
+User -> Controller : POST /api/v1/accounts/{id}/deposits\n{ "amount": 100.00, "currency": "PEN" }
+note right of Controller
+  Aqui solo se recibe y valida el JSON.
+  No hay reglas de negocio en el controlador.
+end note
+
+Controller -> UseCase : deposit(command)
+note right of UseCase
+  Un PUERTO es una interfaz: define QUE se puede hacer,
+  no COMO. Asi el nucleo no depende de Spring.
+end note
+UseCase -> Service : (implementacion)
+
+Service -> Repo : findById(accountId)
+Repo -> DB : SELECT (R2DBC, no bloqueante)
+DB --> Repo : cuenta (contador mensual + version)
+Repo --> Service : Maybe<Account>
+note right of Repo
+  Internamente usa Reactor (Mono),
+  pero entrega RxJava al nucleo:
+  la conversion se hace en el borde.
+end note
+
+Service -> Rule : validate(account, DEPOSIT, amount, today)
+note right of Rule
+  STRATEGY: ahorro aplica limite mensual,
+  corriente no tiene limite y plazo fijo permite
+  movimientos solo en el dia definido.
+end note
+
+alt regla no se cumple
+  Rule --> Service : error de negocio
+  Service --> Controller : error
+  Controller --> User : 422 Unprocessable Entity
+else regla se cumple
+  Rule --> Service : OK
+  Service -> Domain : deposit(amount) + registerMovement(today)
+  Service -> Repo : save(account)
+  Repo -> DB : UPDATE cuenta (version optimista)
+  alt conflicto de concurrencia
+    DB --> Repo : version desactualizada
+    Repo --> Service : conflicto
+    Service --> Controller : error
+    Controller --> User : 409 Conflict
+  else cuenta guardada
+    DB --> Repo : OK
+    Repo --> Service : Single<Account>
+    Service -> MovGw : register(movement)
+    MovGw -> TxSvc : POST /api/v1/movements
+    alt movimiento registrado
+      TxSvc --> MovGw : 201 Created + Movement
+      MovGw --> Service : Single<Movement>
+      Service --> Controller : Single<MovementReceipt>
+      Controller --> User : 201 Created + recibo
+    else fallo confirmado del registro
+      TxSvc --> MovGw : error definitivo
+      MovGw --> Service : error
+      Service -> Domain : compensate(DEPOSIT, amount)
+      Service -> Repo : save(cuenta compensada)
+      Repo -> DB : UPDATE cuenta (version optimista)
+      DB --> Repo : OK / conflicto de concurrencia
+      note right of Repo
+        Si la cuenta cambio antes de compensar, no sobrescribir
+        el saldo actualizado; el caso requiere reconciliacion.
+      end note
+      Service --> Controller : error
+      Controller --> User : 503 Service Unavailable
+    else timeout (resultado ambiguo)
+      MovGw --> Service : timeout; no se sabe si se guardo
+      note right of Service
+        No compensar automaticamente: el movimiento pudo
+        haberse persistido. Se devuelve 503 y se requiere
+        reconciliacion manual. Parte III: outbox + Kafka.
+      end note
+      Service --> Controller : resultado indeterminado
+      Controller --> User : 503 Service Unavailable
+    end
+  end
+end
+
+note over User, TxSvc
+  WebFlux se suscribe al final de la cadena reactiva.
+  La conversion Reactor <-> RxJava ocurre en los adaptadores.
+end note
+
+@enduml
