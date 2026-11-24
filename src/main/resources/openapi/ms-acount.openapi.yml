@@ -77,6 +77,33 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/AccountCreateRequest'
+            examples:
+              savings:
+                summary: Personal savings account
+                value:
+                  accountType: SAVINGS
+                  holders:
+                    - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  currency: PEN
+                  maxMonthlyMovements: 20
+              checking:
+                summary: Business checking account
+                value:
+                  accountType: CHECKING
+                  holders:
+                    - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  currency: PEN
+                  maintenanceFee:
+                    amount: 10.00
+                    currency: PEN
+              fixedTerm:
+                summary: Personal fixed-term account
+                value:
+                  accountType: FIXED_TERM
+                  holders:
+                    - 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  currency: PEN
+                  allowedMovementDay: 15
       responses:
         '201':
           description: Account opened

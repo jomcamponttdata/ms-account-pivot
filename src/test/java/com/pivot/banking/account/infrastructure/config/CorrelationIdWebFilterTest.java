@@ -1,6 +1,8 @@
 package com.pivot.banking.account.infrastructure.config;
 
+import org.slf4j.MDC;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.mock.http.server.reactive.MockServerHttpRequest;
 import org.springframework.mock.web.server.MockServerWebExchange;
 import org.springframework.web.server.WebFilterChain;
@@ -76,5 +78,39 @@ class CorrelationIdWebFilterTest {
         assertNotNull(generated);
         assertEquals(false, generated.isBlank());
         assertEquals(generated, capturedContext.get().get("correlationId"));
+    }
+
+    @Test
+    void logsRequestOutcomesAndRestoresPreviousMdcValue() {
+        // Arrange
+        String previousCorrelationId = "outer-correlation";
+        MDC.put("correlationId", previousCorrelationId);
+        var clientError = MockServerWebExchange.from(MockServerHttpRequest.get("/api/v1/accounts")
+                .header("X-Correlation-ID", "client-error-correlation").build());
+        clientError.getResponse().setStatusCode(HttpStatus.BAD_REQUEST);
+        var serverError = MockServerWebExchange.from(MockServerHttpRequest.get("/api/v1/accounts")
+                .header("X-Correlation-ID", "server-error-correlation").build());
+        serverError.getResponse().setStatusCode(HttpStatus.INTERNAL_SERVER_ERROR);
+        var failed = MockServerWebExchange.from(MockServerHttpRequest.get("/api/v1/accounts")
+                .header("X-Correlation-ID", "failed-correlation").build());
+        WebFilterChain successChain = ignored -> Mono.empty();
+
+        try {
+            // Act
+            Mono<Void> clientErrorResult = new CorrelationIdWebFilter().filter(clientError, successChain);
+            Mono<Void> serverErrorResult = new CorrelationIdWebFilter().filter(serverError, successChain);
+            Mono<Void> failedResult = new CorrelationIdWebFilter().filter(
+                    failed, ignored -> Mono.error(new IllegalStateException("test failure")));
+
+            // Assert
+            StepVerifier.create(clientErrorResult).verifyComplete();
+            assertEquals(previousCorrelationId, MDC.get("correlationId"));
+            StepVerifier.create(serverErrorResult).verifyComplete();
+            assertEquals(previousCorrelationId, MDC.get("correlationId"));
+            StepVerifier.create(failedResult).expectError(IllegalStateException.class).verify();
+            assertEquals(previousCorrelationId, MDC.get("correlationId"));
+        } finally {
+            MDC.remove("correlationId");
+        }
     }
 }
