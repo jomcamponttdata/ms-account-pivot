@@ -4,157 +4,291 @@ title account-service - Diagrama de secuencia
 skinparam shadowing false
 skinparam sequenceMessageAlign center
 
-actor "Cliente\n(Postman)" as User
-participant "AccountController\n(inbound adapter)" as Controller
-participant "AccountCommandService" as Cmd
-participant "AccountOperationService" as Op
-participant "AccountQueryService" as Qry
-participant "PolicyFactory /\nOperationRuleFactory" as Factory
-participant "Strategy\n(Policy / Rule)" as Strategy
-participant "AccountRepositoryPort\n+ R2dbcAdapter" as Repo
-participant "CustomerQueryPort\n+ WebClientAdapter" as CustGw
-participant "MovementGatewayPort\n+ WebClientAdapter" as MovGw
+actor "Cliente / Empleado\n(Postman)" as User
+participant "AccountController\n(adaptador WebFlux)" as Controller
+participant "AccountApplicationService\n(casos de uso, RxJava 3)" as Service
+participant "AccountCreationPolicyFactory /\nAccountOperationRuleFactory" as Factory
+participant "AccountRepositoryPort\n+ adaptador R2DBC" as Repo
+participant "CustomerGateway\n+ WebClientCustomerGateway" as CustomerGw
+participant "MovementGateway\n+ WebClientMovementGateway" as MovementGw
 database "PostgreSQL\naccount_db" as DB
-participant "customer-service" as CustSvc
-participant "transaction-service" as TxSvc
+participant "customer-service" as CustomerSvc
+participant "transaction-service" as TransactionSvc
+participant "CorrelationIdWebFilter\n(WebFilter, prioridad máxima)" as Correlation
+
+note over Controller, MovementGw
+  Los casos de uso y puertos usan RxJava 3.
+  WebFlux conserva Mono/Flux; los controladores convierten
+  explícitamente con RxJava3Adapter. Los adaptadores R2DBC y
+  WebClient convierten sus publishers Reactor a tipos RxJava en el límite.
+  Las políticas de dominio son síncronas.
+end note
+
+note over User, Correlation
+  Todas las solicitudes entrantes pasan por este filtro. Reutiliza
+  X-Correlation-ID si no está vacío; si falta o está en blanco, genera un UUID.
+  Todas las respuestas incluyen X-Correlation-ID: {id}. El controlador pasa
+  el ID explícitamente a los casos de uso y los WebClient salientes lo envían
+  en X-Correlation-ID.
+end note
 
 == 1. Abrir cuenta (POST /api/v1/accounts) ==
-User -> Controller : POST /accounts {accountType, holders, currency, ...}
-Controller -> Cmd : create(command)
-loop por cada holderId recibido
-  Cmd -> CustGw : findById(holderId)
-  CustGw -> CustSvc : GET /customers/{holderId}
-  CustSvc --> CustGw : cliente (tipo, estado)
-  CustGw --> Cmd : CustomerSnapshot
+User -> Controller : POST /api/v1/accounts\nAccountCreateRequest
+Controller -> Service : create(command): Single<Account>
+loop cada holder de la solicitud
+  Service -> CustomerGw : findById(holderId, correlationId): Maybe<CustomerSnapshot>
+  CustomerGw -> CustomerSvc : GET /api/v1/customers/{customerId}\nX-Correlation-ID: {id}
+  CustomerSvc --> CustomerGw : 200 Customer\n(customerType, status)\nX-Correlation-ID: {id}
+  CustomerGw --> Service : monoToMaybe(...): Maybe<CustomerSnapshot>
 end
-alt un titular no existe
-  Cmd --> Controller : ResourceNotFoundException
+alt customer-service responde 404
+  CustomerSvc --> CustomerGw : 404 Not Found\nX-Correlation-ID: {id}
+  CustomerGw --> Service : CustomerNotFoundException
+  Service --> Controller : Single.error(...)
   Controller --> User : 404 Not Found
-else algun titular esta INACTIVE
-  Cmd --> Controller : BusinessRuleViolationException
-  Controller --> User : 422 Unprocessable Entity
-else todos existen y estan activos
-  Cmd -> Repo : findByHolderIds(holderIds)
-  Repo -> DB : SELECT cuentas de todos los titulares
-  DB --> Repo : cuentas existentes
-  Repo --> Cmd : cuentas existentes por titular
-  Cmd -> Factory : get(customerType / holder types)
-  Factory --> Cmd : Personal / BusinessAccountCreationPolicy
-  Cmd -> Strategy : validate(account, all holders, existingAccounts)
-  alt tipos de titular o reglas de apertura no validos
-    Strategy --> Cmd : BusinessRuleViolationException
-    Cmd --> Controller : error
+else titulares activos y válidos
+  Service -> Service : validar tipo homogéneo,\nestado ACTIVE y reglas de apertura
+  opt titular PERSONAL y tipo distinto de FIXED_TERM
+    Service -> Repo : findAll(customerId, accountType, 0, 100): Flowable<Account>
+    Repo -> DB : SELECT cuentas del titular y tipo
+    DB --> Repo : cuentas existentes
+    Repo --> Service : fluxToFlowable(...): Flowable<Account>
+  end
+  Service -> Factory : get(customerType).validate(...)
+  Factory --> Service : validación síncrona\n(o excepción de regla)
+  alt política o campos de producto no válidos
+    Service --> Controller : BusinessRuleViolationException
     Controller --> User : 422 Unprocessable Entity
-  else reglas validas
-    Cmd -> Repo : save(account with balance zero)
-    Repo -> DB : INSERT cuenta + titulares + firmantes
-    note right of DB
-      Restricciones unicas respaldan las reglas de
-      titularidad/producto ante altas concurrentes.
-      La colision se traduce a 422.
-    end note
-    DB --> Repo : OK / unique constraint violation
-    alt conflicto de restriccion unica
-      Repo --> Cmd : DuplicateProductException
-      Cmd --> Controller : error
-      Controller --> User : 422 Unprocessable Entity
-    else cuenta guardada
-      Repo --> Cmd : Single<Account>
-      Cmd --> Controller : Single<Account>
-      Controller --> User : 201 Created + Location
-    end
+  else política válida
+    Service -> Repo : save(cuenta con saldo inicial 0): Single<Account>
+    Repo -> DB : INSERT cuenta
+    Repo -> DB : INSERT relaciones de titulares y firmantes\n(en la misma transacción)
+    DB --> Repo : cuenta y relaciones guardadas
+    Repo --> Service : monoToSingle(...): Single<Account>
+    Service --> Controller : Single<Account>
+    Controller -> Controller : RxJava3Adapter.singleToMono(...)
+    Controller --> User : 201 Created + Location\nAccount
   end
 end
+note over Service, Factory
+  Personal: una SAVINGS, una CHECKING y cualquier cantidad de FIXED_TERM;
+  exactamente un titular. Business: solo CHECKING, uno o más titulares
+  y firmantes autorizados opcionales. Toda cuenta inicia en cero.
+end note
+note over Controller, User
+  Respuestas del contrato: 201, 400, 404, 422 y 503.
+  400 corresponde a una solicitud inválida; 503, a un servicio dependiente.
+end note
 
-== 2. Depositar (POST /api/v1/accounts/{id}/deposits) ==
-User -> Controller : POST /accounts/{id}/deposits\n{amount, currency, description}
-Controller -> Op : deposit(operationCommand)
-Op -> Repo : findById(accountId)
-Repo -> DB : SELECT
-DB --> Repo : cuenta (contador mensual + version)
-Repo --> Op : Maybe<Account>
-alt cuenta no existe
-  Op --> Controller : ResourceNotFoundException
+== 2. Listar cuentas (GET /api/v1/accounts) ==
+User -> Controller : GET /api/v1/accounts\n?customerId&accountType&page&size
+Controller -> Service : findAll(filter, page, size): Flowable<Account>
+Service -> Repo : findAll(filter, page, size): Flowable<Account>
+Repo -> DB : SELECT filtros; ORDER BY createdAt, id\nLIMIT/OFFSET + cargar relaciones
+DB --> Repo : cuentas y relaciones
+Repo --> Service : fluxToFlowable(...): Flowable<Account>
+Controller -> Controller : RxJava3Adapter.flowableToFlux(...)
+Controller --> User : 200 OK\napplication/json (arreglo) o application/x-ndjson
+note over Controller, User
+  Parámetros inválidos: 400 Bad Request.
+end note
+
+== 3. Consultar cuenta (GET /api/v1/accounts/{accountId}) ==
+User -> Controller : GET /api/v1/accounts/{accountId}
+Controller -> Service : findById(accountId): Single<Account>
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta y relaciones
+DB --> Repo : fila o vacío
+alt no existe
+  Repo --> Service : monoToMaybe(...): Maybe.empty()
+  Service --> Controller : AccountNotFoundException
+  Controller -> Controller : RxJava3Adapter.singleToMono(...)\npropaga el error
   Controller --> User : 404 Not Found
-else cuenta existe
-  Op -> Factory : get(accountType)
-  Factory --> Op : Savings / Checking / FixedTermOperationRule
-  Op -> Strategy : validate(account, DEPOSIT, amount, today)
-  alt regla no se cumple
-    Strategy --> Op : BusinessRuleViolationException
-    Op --> Controller : error
+else existe
+  Repo --> Service : monoToMaybe(...): Maybe<Account>
+  Service --> Controller : Single<Account>
+  Controller -> Controller : RxJava3Adapter.singleToMono(...)
+  Controller --> User : 200 OK + Account
+end
+
+== 4. Actualizar cuenta (PUT /api/v1/accounts/{accountId}) ==
+User -> Controller : PUT /api/v1/accounts/{accountId}\nAccountUpdateRequest
+Controller -> Service : update(accountId, command): Single<Account>
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta y relaciones
+DB --> Repo : cuenta actual
+Repo --> Service : Maybe<Account>
+loop cada titular nuevo
+  Service -> CustomerGw : findById(holderId, correlationId): Maybe<CustomerSnapshot>
+  CustomerGw -> CustomerSvc : GET /api/v1/customers/{customerId}\nX-Correlation-ID: {id}
+  CustomerSvc --> CustomerGw : Customer activo\nX-Correlation-ID: {id}
+  CustomerGw --> Service : monoToMaybe(...): Maybe<CustomerSnapshot>
+end
+opt titular PERSONAL y cuenta distinta de FIXED_TERM
+  Service -> Repo : findAll(customerId, accountType, 0, 100): Flowable<Account>
+  Repo -> DB : SELECT productos personales del tipo
+  DB --> Repo : cuentas existentes
+  Repo --> Service : Flowable<Account>
+end
+Service -> Service : validar titulares, política y campos\n(no cambiar tipo ni saldo)
+Service -> Repo : save(cuenta actualizada): Single<Account>
+Repo -> DB : UPDATE cuenta + reemplazar relaciones\n(con control de versión)
+alt error de regla o titular inactivo
+  Service --> Controller : BusinessRuleViolationException
+  Controller --> User : 422 Unprocessable Entity
+else conflicto de versión
+  Repo --> Service : ConcurrentModificationException
+  Controller --> User : 409 Conflict
+else guardado
+  DB --> Repo : cuenta y relaciones actualizadas
+  Repo --> Service : Single<Account>
+  Service --> Controller : Single<Account>
+  Controller -> Controller : RxJava3Adapter.singleToMono(...)
+  Controller --> User : 200 OK + Account
+end
+note over User, Controller
+  Respuestas del contrato: 200, 400, 404, 409, 422 y 503.
+  Titular no encontrado: 404; solicitud inválida: 400;
+  falla de servicio dependiente: 503.
+end note
+
+== 5. Eliminar cuenta (DELETE /api/v1/accounts/{accountId}) ==
+User -> Controller : DELETE /api/v1/accounts/{accountId}
+Controller -> Service : delete(accountId): Completable
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta y relaciones
+alt no existe
+  Service --> Controller : AccountNotFoundException
+  Controller --> User : 404 Not Found
+else existe
+  Service -> Repo : delete(account): Completable
+  Repo -> DB : DELETE relaciones de titulares y firmantes;\nDELETE cuenta (misma transacción)
+  DB --> Repo : OK
+  Repo --> Service : monoToCompletable(...): Completable
+  Controller -> Controller : RxJava3Adapter.completableToMono(...)
+  Controller --> User : 204 No Content
+end
+
+== 6. Consultar saldo (GET /api/v1/accounts/{accountId}/balance) ==
+User -> Controller : GET /api/v1/accounts/{accountId}/balance
+Controller -> Service : findById(accountId): Single<Account>
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta
+alt no existe
+  Service --> Controller : AccountNotFoundException
+  Controller --> User : 404 Not Found
+else existe
+  Repo --> Service : Maybe<Account>
+  Service --> Controller : Single<Account>
+  Controller -> Controller : RxJava3Adapter.singleToMono(...)
+  Controller --> User : 200 OK + Balance\n(productType=BANK_ACCOUNT)
+end
+
+== 7. Depositar (POST /api/v1/accounts/{accountId}/deposits) ==
+User -> Controller : POST /api/v1/accounts/{accountId}/deposits\nOperationRequest
+Controller -> Service : operate(accountId, DEPOSIT, command): Single<MovementReceipt>
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta y version
+alt cuenta inexistente
+  Service --> Controller : AccountNotFoundException
+  Controller --> User : 404 Not Found
+else cuenta existente
+  DB --> Repo : cuenta original
+  Repo --> Service : Maybe<Account>
+  Service -> Factory : get(accountType).validate(DEPOSIT, ...)
+  alt regla incumplida
+    Factory --> Service : BusinessRuleViolationException
     Controller --> User : 422 Unprocessable Entity
-  else regla se cumple
-    Op -> Op : account.deposit(amount)\naccount.registerMovement(today)
-    Op -> Repo : save(account)
-    Repo -> DB : UPDATE cuenta WHERE version = ?
-    alt version desactualizada
-      DB --> Repo : conflicto de concurrencia
-      Repo --> Op : ConcurrentModificationException
-      Op --> Controller : error
+  else regla válida
+    Factory --> Service : validación síncrona
+    Service -> Repo : save(account.registerMovement(DEPOSIT, ...)): Single<Account>
+    Repo -> DB : UPDATE saldo y movimientos del mes\ncon control optimista de versión
+    alt versión desactualizada
+      Repo --> Service : ConcurrentModificationException
       Controller --> User : 409 Conflict
-    else saldo guardado
-      DB --> Repo : OK
-      Repo --> Op : Single<Account>
-      Op -> MovGw : register(movementCommand)
-      MovGw -> TxSvc : POST /api/v1/movements
+    else saldo actualizado
+      DB --> Repo : cuenta guardada
+      Repo --> Service : Single<Account> actualizado
+      Service -> MovementGw : register(cuenta, DEPOSIT, ..., correlationId): Single<MovementReceipt>
+      MovementGw -> TransactionSvc : POST /api/v1/movements\nMovementRequest\nX-Correlation-ID: {id}
       alt movimiento registrado
-        TxSvc --> MovGw : 201 Created + Movement
-        MovGw --> Op : MovementReceipt
-        Op --> Controller : MovementReceipt
-        Controller --> User : 201 Created
-      else fallo confirmado del registro
-        TxSvc --> MovGw : error definitivo
-        MovGw --> Op : error
-        Op -> Op : account.compensate(DEPOSIT, amount)
-        Op -> Repo : restoreAfterFailedMovement(previousState, version)
-        Repo -> DB : UPDATE compensatorio con control de version
-        DB --> Repo : OK / conflicto de concurrencia
-        note right of Repo
-          Si otra operacion modifico la cuenta primero,
-          no sobrescribirla: requiere reconciliacion.
-        end note
-        Op --> Controller : error
+        TransactionSvc --> MovementGw : 201 Created + Movement\nX-Correlation-ID: {id}
+        MovementGw --> Service : monoToSingle(...): Single<MovementReceipt>
+        Service --> Controller : Single<MovementReceipt>
+        Controller -> Controller : RxJava3Adapter.singleToMono(...)
+        Controller --> User : 201 Created + MovementReceipt
+      else fallo confirmado (respuesta 4xx)
+        TransactionSvc --> MovementGw : error definitivo\nX-Correlation-ID: {id}
+        MovementGw --> Service : DownstreamServiceException no ambiguo
+        Service -> Repo : save(estado original con versión actual)
+        Repo -> DB : UPDATE compensatorio con control de versión
+        DB --> Repo : compensación confirmada
         Controller --> User : 503 Service Unavailable
-      else timeout de resultado ambiguo
-        MovGw --> Op : timeout; movimiento posiblemente guardado
-        note right of Op
-          No compensar automaticamente: reconciliar el
-          movimiento antes de decidir el estado final.
+      else timeout, transporte o respuesta 5xx
+        MovementGw --> Service : error ambiguo\n(movimiento posiblemente persistido)
+        note right of Service
+          No compensar. Requiere reconciliar
+          el resultado del movimiento.
         end note
-        Op --> Controller : resultado indeterminado
         Controller --> User : 503 Service Unavailable
       end
     end
   end
 end
-
-== 3. Retirar (POST /api/v1/accounts/{id}/withdrawals) ==
-User -> Controller : POST /accounts/{id}/withdrawals\n{amount, currency, description}
-Controller -> Op : withdraw(operationCommand)
-note over Op, MovGw
-  Mismos pasos que el deposito; ademas se valida saldo suficiente.
-  Se actualiza el saldo con bloqueo optimista y se registra
-  el movimiento. Fallo confirmado: compensacion local; timeout:
-  resultado ambiguo y reconciliacion.
+note over Controller, User
+  Solicitud inválida: 400 Bad Request.
 end note
-Op --> Controller : MovementReceipt / error
-Controller --> User : 201 Created / error HTTP correspondiente
 
-== 4. Consultar saldo (GET /api/v1/accounts/{id}/balance) ==
-User -> Controller : GET /accounts/{id}/balance
-Controller -> Qry : getBalance(accountId)
-Qry -> Repo : findById(accountId)
-Repo -> DB : SELECT
-DB --> Repo : cuenta
-Repo --> Qry : Maybe<Account>
-Qry --> Controller : Single<Balance>
-Controller --> User : 200 OK {balance, currency}
-
-note over User, TxSvc
-  Los demas CRUD (GET list paginado con page/size, GET by id, PUT, DELETE)
-  siguen el patron buscar -> validar -> guardar. PUT no cambia tipo ni saldo.
-  El historial de movimientos se consulta en transaction-service.
+== 8. Retirar (POST /api/v1/accounts/{accountId}/withdrawals) ==
+User -> Controller : POST /api/v1/accounts/{accountId}/withdrawals\nOperationRequest
+Controller -> Service : operate(accountId, WITHDRAWAL, command): Single<MovementReceipt>
+Service -> Repo : findById(accountId): Maybe<Account>
+Repo -> DB : SELECT cuenta y version
+alt cuenta inexistente
+  Service --> Controller : AccountNotFoundException
+  Controller --> User : 404 Not Found
+else cuenta existente
+  DB --> Repo : cuenta original
+  Repo --> Service : Maybe<Account>
+  Service -> Factory : get(accountType).validate(WITHDRAWAL, ...)\ny validar saldo suficiente
+  alt regla o saldo incumplidos
+    Factory --> Service : BusinessRuleViolationException
+    Controller --> User : 422 Unprocessable Entity
+  else operación válida
+    Service -> Repo : save(account.registerMovement(WITHDRAWAL, ...)): Single<Account>
+    Repo -> DB : UPDATE saldo y movimientos del mes\ncon control optimista de versión
+    alt versión desactualizada
+      Repo --> Service : ConcurrentModificationException
+      Controller --> User : 409 Conflict
+    else saldo actualizado
+      DB --> Repo : cuenta guardada
+      Repo --> Service : Single<Account> actualizado
+      Service -> MovementGw : register(cuenta, WITHDRAWAL, ..., correlationId): Single<MovementReceipt>
+      MovementGw -> TransactionSvc : POST /api/v1/movements\nMovementRequest\nX-Correlation-ID: {id}
+      alt movimiento registrado
+        TransactionSvc --> MovementGw : 201 Created + Movement\nX-Correlation-ID: {id}
+        MovementGw --> Service : Single<MovementReceipt>
+        Service --> Controller : Single<MovementReceipt>
+        Controller -> Controller : RxJava3Adapter.singleToMono(...)
+       Controller --> User : 201 Created + MovementReceipt
+      else error confirmado al registrar movimiento
+        TransactionSvc --> MovementGw : error definitivo\nX-Correlation-ID: {id}
+        MovementGw --> Service : error definitivo no ambiguo\n(X-Correlation-ID: {id})
+        Service -> Repo : restaurar saldo original
+        Repo -> DB : UPDATE compensatorio con control optimista
+        Controller --> User : 503 Service Unavailable
+      else resultado remoto ambiguo (timeout, transporte o 5xx)
+        note over Service, MovementGw
+          No restaurar automáticamente; el movimiento podría existir.
+          Requiere reconciliación.
+        end note
+        Controller --> User : 503 Service Unavailable
+      end
+    end
+  end
+end
+note over Controller, User
+  Solicitud inválida: 400 Bad Request.
 end note
 
 @enduml

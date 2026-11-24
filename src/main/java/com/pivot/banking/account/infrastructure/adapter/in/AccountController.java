@@ -20,6 +20,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.lang.Nullable;
 import org.springframework.stereotype.Controller;
 import org.springframework.web.server.ServerWebExchange;
+import reactor.adapter.rxjava.RxJava3Adapter;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -58,7 +59,9 @@ public class AccountController implements AccountsApi {
     @Override
     public Mono<ResponseEntity<Account>> createAccount(Mono<AccountCreateRequest> request,
                                                         ServerWebExchange exchange) {
-        return request.flatMap(body -> createAccount.create(mapper.toCreateCommand(body)))
+        return request.flatMap(body -> RxJava3Adapter.singleToMono(
+                        createAccount.create(mapper.toCreateCommand(body)
+                                .withCorrelationId(correlationId(exchange)))))
                 .map(mapper::toResponse)
                 .map(account -> ResponseEntity.created(URI.create("/api/v1/accounts/" + account.getId()))
                         .body(account));
@@ -67,22 +70,25 @@ public class AccountController implements AccountsApi {
     /** Deletes an account and returns no content. */
     @Override
     public Mono<ResponseEntity<Void>> deleteAccount(UUID accountId, ServerWebExchange exchange) {
-        return deleteAccount.delete(accountId).thenReturn(ResponseEntity.noContent().build());
+        return RxJava3Adapter.completableToMono(deleteAccount.delete(accountId))
+                .thenReturn(ResponseEntity.noContent().build());
     }
 
     /** Deposits money and returns the registered movement receipt. */
     @Override
     public Mono<ResponseEntity<MovementReceipt>> depositToAccount(UUID accountId, Mono<OperationRequest> request,
                                                                    ServerWebExchange exchange) {
-        return request.flatMap(body -> operateAccount.operate(accountId, MovementType.DEPOSIT,
-                        mapper.toOperationCommand(body)))
+        return request.flatMap(body -> RxJava3Adapter.singleToMono(operateAccount.operate(accountId,
+                        MovementType.DEPOSIT, mapper.toOperationCommand(body)
+                                .withCorrelationId(correlationId(exchange)))))
                 .map(mapper::toMovementResponse).map(receipt -> ResponseEntity.status(201).body(receipt));
     }
 
     /** Retrieves an account by identifier. */
     @Override
     public Mono<ResponseEntity<Account>> findAccountById(UUID accountId, ServerWebExchange exchange) {
-        return getAccounts.findById(accountId).map(mapper::toResponse).map(ResponseEntity::ok);
+        return RxJava3Adapter.singleToMono(getAccounts.findById(accountId))
+                .map(mapper::toResponse).map(ResponseEntity::ok);
     }
 
     /** Returns the requested page with optional customer and type filters. */
@@ -91,8 +97,9 @@ public class AccountController implements AccountsApi {
             @Nullable AccountType accountType, Integer page, Integer size, ServerWebExchange exchange) {
         var type = accountType == null ? null
                 : com.pivot.banking.account.domain.AccountType.valueOf(accountType.name());
-        Flux<Account> accounts = getAccounts.findAll(new AccountFilter(customerId, type),
-                page == null ? defaultPage : page, size == null ? defaultPageSize : size)
+        Flux<Account> accounts = RxJava3Adapter.flowableToFlux(getAccounts.findAll(
+                        new AccountFilter(customerId, type), page == null ? defaultPage : page,
+                        size == null ? defaultPageSize : size))
                 .map(mapper::toResponse);
         return Mono.just(ResponseEntity.ok(accounts));
     }
@@ -100,14 +107,17 @@ public class AccountController implements AccountsApi {
     /** Retrieves the current available account balance. */
     @Override
     public Mono<ResponseEntity<Balance>> getAccountBalance(UUID accountId, ServerWebExchange exchange) {
-        return getAccounts.findById(accountId).map(mapper::toBalanceResponse).map(ResponseEntity::ok);
+        return RxJava3Adapter.singleToMono(getAccounts.findById(accountId))
+                .map(mapper::toBalanceResponse).map(ResponseEntity::ok);
     }
 
     /** Updates editable account properties. */
     @Override
     public Mono<ResponseEntity<Account>> updateAccount(UUID accountId, Mono<AccountUpdateRequest> request,
                                                         ServerWebExchange exchange) {
-        return request.flatMap(body -> updateAccount.update(accountId, mapper.toUpdateCommand(body)))
+        return request.flatMap(body -> RxJava3Adapter.singleToMono(
+                        updateAccount.update(accountId, mapper.toUpdateCommand(body)
+                                .withCorrelationId(correlationId(exchange)))))
                 .map(mapper::toResponse).map(ResponseEntity::ok);
     }
 
@@ -115,8 +125,16 @@ public class AccountController implements AccountsApi {
     @Override
     public Mono<ResponseEntity<MovementReceipt>> withdrawFromAccount(UUID accountId,
             Mono<OperationRequest> request, ServerWebExchange exchange) {
-        return request.flatMap(body -> operateAccount.operate(accountId, MovementType.WITHDRAWAL,
-                        mapper.toOperationCommand(body)))
+        return request.flatMap(body -> RxJava3Adapter.singleToMono(operateAccount.operate(accountId,
+                        MovementType.WITHDRAWAL, mapper.toOperationCommand(body)
+                                .withCorrelationId(correlationId(exchange)))))
                 .map(mapper::toMovementResponse).map(receipt -> ResponseEntity.status(201).body(receipt));
+    }
+
+    private String correlationId(ServerWebExchange exchange) {
+        String correlationId = exchange.getAttribute("correlationId");
+        return correlationId == null
+                ? exchange.getRequest().getHeaders().getFirst("X-Correlation-ID")
+                : correlationId;
     }
 }

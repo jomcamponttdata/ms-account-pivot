@@ -2,7 +2,6 @@ package com.pivot.banking.account.domain.strategy;
 
 import com.pivot.banking.account.domain.Account;
 import com.pivot.banking.account.domain.CustomerSnapshot;
-import reactor.core.publisher.Mono;
 
 import java.util.List;
 
@@ -10,5 +9,5 @@ import java.util.List;
 public interface AccountCreationPolicy {
 
     /** Validates holders, product type, and accounts already owned by those holders. */
-    Mono<Void> validate(Account account, List<CustomerSnapshot> holders, List<Account> existingAccounts);
+    void validate(Account account, List<CustomerSnapshot> holders, List<Account> existingAccounts);
 }

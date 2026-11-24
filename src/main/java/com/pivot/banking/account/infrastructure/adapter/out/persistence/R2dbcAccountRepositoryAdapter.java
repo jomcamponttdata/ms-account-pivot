@@ -6,6 +6,10 @@ import com.pivot.banking.account.domain.AccountFilter;
 import com.pivot.banking.account.domain.AuthorizedSigner;
 import com.pivot.banking.account.domain.exception.BusinessRuleViolationException;
 import com.pivot.banking.account.domain.exception.ConcurrentModificationException;
+import io.reactivex.rxjava3.core.Completable;
+import io.reactivex.rxjava3.core.Flowable;
+import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Single;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.data.domain.Sort;
@@ -14,6 +18,7 @@ import org.springframework.data.relational.core.query.Criteria;
 import org.springframework.data.relational.core.query.Query;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.annotation.Transactional;
+import reactor.adapter.rxjava.RxJava3Adapter;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -43,17 +48,22 @@ public class R2dbcAccountRepositoryAdapter implements AccountRepositoryPort {
     /** Saves the account and its relations atomically. */
     @Override
     @Transactional
-    public Mono<Account> save(Account account) {
+    public Single<Account> save(Account account) {
+        return RxJava3Adapter.monoToSingle(saveReactor(account));
+    }
+
+    /** Persists the aggregate and relations using Spring Data's native Reactor publishers. */
+    private Mono<Account> saveReactor(Account account) {
         return accounts.save(AccountEntity.fromDomain(account))
                 .flatMap(entity -> holders.deleteByAccountId(entity.getId())
                         .then(signers.deleteByAccountId(entity.getId()))
-                        .thenMany(holders.saveAll(account.holders().stream()
+                        .thenMany(Flux.fromIterable(account.holders().stream()
                                 .map(customerId -> new AccountHolderEntity(UUID.randomUUID(), entity.getId(),
                                         customerId, account.holderType().name(), account.accountType().name()))
-                                .toList()))
-                        .thenMany(signers.saveAll(account.authorizedSigners().stream()
+                                .toList()).concatMap(template::insert))
+                        .thenMany(Flux.fromIterable(account.authorizedSigners().stream()
                                 .map(signer -> AuthorizedSignerEntity.fromDomain(entity.getId(), signer))
-                                .toList()))
+                                .toList()).concatMap(template::insert))
                         .then(load(entity)))
                 .onErrorMap(OptimisticLockingFailureException.class,
                         failure -> new ConcurrentModificationException(account.id()))
@@ -66,17 +76,17 @@ public class R2dbcAccountRepositoryAdapter implements AccountRepositoryPort {
 
     /** Finds an account and hydrates its holder and signer relations. */
     @Override
-    public Mono<Account> findById(UUID id) {
-        return accounts.findById(id).flatMap(this::load);
+    public Maybe<Account> findById(UUID id) {
+        return RxJava3Adapter.monoToMaybe(accounts.findById(id).flatMap(this::load));
     }
 
     /** Finds a stable ordered page matching account-type and holder filters. */
     @Override
-    public Flux<Account> findAll(AccountFilter filter, int page, int size) {
+    public Flowable<Account> findAll(AccountFilter filter, int page, int size) {
         Mono<List<UUID>> accountIds = filter.customerId() == null
                 ? Mono.just(List.of())
                 : holders.findByCustomerId(filter.customerId()).map(AccountHolderEntity::getAccountId).collectList();
-        return accountIds.flatMapMany(ids -> {
+        Flux<Account> result = accountIds.flatMapMany(ids -> {
             if (filter.customerId() != null && ids.isEmpty()) {
                 return Flux.empty();
             }
@@ -93,15 +103,23 @@ public class R2dbcAccountRepositoryAdapter implements AccountRepositoryPort {
                     .offset((long) page * size);
             return template.select(query, AccountEntity.class).concatMap(this::load);
         });
+        return RxJava3Adapter.fluxToFlowable(result);
     }
 
     /** Deletes holder and signer relations before deleting the account row. */
     @Override
     @Transactional
-    public Mono<Void> delete(Account account) {
+    public Completable delete(Account account) {
+        return RxJava3Adapter.monoToCompletable(deleteReactor(account));
+    }
+
+    /** Deletes all rows for an aggregate using Spring Data's native Reactor publishers. */
+    private Mono<Void> deleteReactor(Account account) {
         return holders.deleteByAccountId(account.id())
                 .then(signers.deleteByAccountId(account.id()))
-                .then(accounts.deleteById(account.id()));
+                .then(accounts.delete(AccountEntity.fromDomain(account)))
+                .onErrorMap(OptimisticLockingFailureException.class,
+                        failure -> new ConcurrentModificationException(account.id()));
     }
 
     /** Rehydrates an account scalar row with its holder and signer relations. */

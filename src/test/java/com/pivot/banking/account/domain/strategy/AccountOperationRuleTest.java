@@ -8,7 +8,6 @@ import com.pivot.banking.account.domain.Money;
 import com.pivot.banking.account.domain.MovementType;
 import com.pivot.banking.account.domain.exception.BusinessRuleViolationException;
 import org.junit.jupiter.api.Test;
-import reactor.test.StepVerifier;
 
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -28,11 +27,10 @@ class AccountOperationRuleTest {
         var rule = new SavingsOperationRule();
 
         // Act
-        var result = rule.validate(account, MovementType.DEPOSIT,
-                new Money(new BigDecimal("1.00"), "PEN"), date);
-
         // Assert
-        StepVerifier.create(result).expectError(BusinessRuleViolationException.class).verify();
+        org.junit.jupiter.api.Assertions.assertThrows(BusinessRuleViolationException.class,
+                () -> rule.validate(account, MovementType.DEPOSIT,
+                        new Money(new BigDecimal("1.00"), "PEN"), date));
     }
 
     @Test
@@ -44,11 +42,8 @@ class AccountOperationRuleTest {
         var rule = new CheckingOperationRule();
 
         // Act
-        var result = rule.validate(account, MovementType.WITHDRAWAL,
-                new Money(new BigDecimal("25.00"), "PEN"), date);
-
         // Assert
-        StepVerifier.create(result).verifyComplete();
+        rule.validate(account, MovementType.WITHDRAWAL, new Money(new BigDecimal("25.00"), "PEN"), date);
     }
 
     @Test
@@ -60,11 +55,10 @@ class AccountOperationRuleTest {
         var rule = new FixedTermOperationRule();
 
         // Act
-        var result = rule.validate(account, MovementType.DEPOSIT,
-                new Money(new BigDecimal("25.00"), "PEN"), date);
-
         // Assert
-        StepVerifier.create(result).expectError(BusinessRuleViolationException.class).verify();
+        org.junit.jupiter.api.Assertions.assertThrows(BusinessRuleViolationException.class,
+                () -> rule.validate(account, MovementType.DEPOSIT,
+                        new Money(new BigDecimal("25.00"), "PEN"), date));
     }
 
     @Test
@@ -76,11 +70,10 @@ class AccountOperationRuleTest {
         var rule = new FixedTermOperationRule();
 
         // Act
-        var result = rule.validate(account, MovementType.DEPOSIT,
-                new Money(new BigDecimal("25.00"), "PEN"), date);
-
         // Assert
-        StepVerifier.create(result).expectError(BusinessRuleViolationException.class).verify();
+        org.junit.jupiter.api.Assertions.assertThrows(BusinessRuleViolationException.class,
+                () -> rule.validate(account, MovementType.DEPOSIT,
+                        new Money(new BigDecimal("25.00"), "PEN"), date));
     }
 
     @Test
@@ -92,11 +85,65 @@ class AccountOperationRuleTest {
         var rule = new CheckingOperationRule();
 
         // Act
-        var result = rule.validate(account, MovementType.WITHDRAWAL,
-                new Money(new BigDecimal("25.00"), "PEN"), date);
-
         // Assert
-        StepVerifier.create(result).expectError(BusinessRuleViolationException.class).verify();
+        org.junit.jupiter.api.Assertions.assertThrows(BusinessRuleViolationException.class,
+                () -> rule.validate(account, MovementType.WITHDRAWAL,
+                        new Money(new BigDecimal("25.00"), "PEN"), date));
+    }
+
+    @Test
+    void fixedTermAcceptsOperationOnConfiguredDayWithoutPriorMonthlyMovement() {
+        // Arrange
+        var date = LocalDate.of(2025, 5, 15);
+        var account = account(AccountType.FIXED_TERM, null, 15, 0, YearMonth.from(date),
+                new BigDecimal("100.00"));
+
+        // Act
+        // Assert
+        new FixedTermOperationRule().validate(account, MovementType.DEPOSIT,
+                new Money(new BigDecimal("25.00"), "PEN"), date);
+    }
+
+    @Test
+    void savingsAllowsMovementAfterMonthRollover() {
+        // Arrange
+        var date = LocalDate.of(2025, 6, 1);
+        var account = account(AccountType.SAVINGS, 3, null, 3, YearMonth.from(date.minusMonths(1)),
+                new BigDecimal("100.00"));
+
+        // Act
+        // Assert
+        new SavingsOperationRule().validate(account, MovementType.DEPOSIT,
+                new Money(new BigDecimal("1.00"), "PEN"), date);
+    }
+
+    @Test
+    void fixedTermAllowsMovementAfterMonthRollover() {
+        // Arrange
+        var date = LocalDate.of(2025, 6, 15);
+        var account = account(AccountType.FIXED_TERM, null, 15, 1, YearMonth.from(date.minusMonths(1)),
+                new BigDecimal("100.00"));
+
+        // Act
+        // Assert
+        new FixedTermOperationRule().validate(account, MovementType.DEPOSIT,
+                new Money(new BigDecimal("1.00"), "PEN"), date);
+    }
+
+    @Test
+    void rejectsOperationWhoseCurrencyDoesNotMatchAccountCurrency() {
+        // Arrange
+        var date = LocalDate.of(2025, 5, 15);
+        var account = account(AccountType.CHECKING, null, null, 0, YearMonth.from(date),
+                new BigDecimal("100.00"));
+
+        // Act
+        // Assert
+        var exception = org.junit.jupiter.api.Assertions.assertThrows(BusinessRuleViolationException.class,
+                () -> new CheckingOperationRule().validate(account, MovementType.DEPOSIT,
+                        new Money(new BigDecimal("1.00"), "USD"), date));
+        org.junit.jupiter.api.Assertions.assertEquals(
+                "Operation currency must match account currency", exception.getMessage());
     }
 
     /** Builds an account fixture with product-specific operation counters. */

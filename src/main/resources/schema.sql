@@ -42,6 +42,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_personal_account_product
 
 CREATE INDEX IF NOT EXISTS ix_account_holders_customer ON account_holders (customer_id);
 CREATE INDEX IF NOT EXISTS ix_accounts_created_id ON accounts (created_at, id);
+CREATE INDEX IF NOT EXISTS ix_accounts_type ON accounts (account_type, created_at, id);
 
 CREATE TABLE IF NOT EXISTS account_authorized_signers (
     id UUID PRIMARY KEY,

@@ -1,7 +1,7 @@
 package com.pivot.banking.account.application.port.out;
 
 import com.pivot.banking.account.domain.CustomerSnapshot;
-import reactor.core.publisher.Mono;
+import io.reactivex.rxjava3.core.Maybe;
 
 import java.util.UUID;
 
@@ -9,5 +9,5 @@ import java.util.UUID;
 public interface CustomerGateway {
 
     /** Retrieves the customer data required to validate account ownership. */
-    Mono<CustomerSnapshot> findById(UUID customerId);
+    Maybe<CustomerSnapshot> findById(UUID customerId, String correlationId);
 }

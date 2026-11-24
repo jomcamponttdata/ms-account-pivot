@@ -6,11 +6,17 @@ import com.pivot.banking.account.domain.exception.BusinessRuleViolationException
 import com.pivot.banking.account.domain.exception.ConcurrentModificationException;
 import com.pivot.banking.account.domain.exception.CustomerNotFoundException;
 import com.pivot.banking.account.domain.exception.DownstreamServiceException;
+import jakarta.validation.ConstraintViolationException;
+import org.springframework.dao.DataAccessException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
+import org.springframework.web.bind.support.WebExchangeBindException;
+import org.springframework.web.server.ServerWebInputException;
+
+import java.util.stream.Collectors;
 
 /** Converts application and downstream errors to documented problem responses. */
 @RestControllerAdvice
@@ -47,6 +53,34 @@ public class AccountExceptionHandler {
     @ExceptionHandler(IllegalArgumentException.class)
     public ResponseEntity<Problem> badRequest(IllegalArgumentException exception) {
         return problem(HttpStatus.BAD_REQUEST, "Invalid request", exception.getMessage());
+    }
+
+    /** Returns field-level validation failures using the documented problem format. */
+    @ExceptionHandler(WebExchangeBindException.class)
+    public ResponseEntity<Problem> requestBodyValidation(WebExchangeBindException exception) {
+        String detail = exception.getFieldErrors().stream()
+                .map(error -> error.getField() + ": " + error.getDefaultMessage())
+                .collect(Collectors.joining("; "));
+        return problem(HttpStatus.BAD_REQUEST, "Invalid request", detail);
+    }
+
+    /** Returns a bad-request problem when OpenAPI parameter constraints are violated. */
+    @ExceptionHandler(ConstraintViolationException.class)
+    public ResponseEntity<Problem> requestParameterValidation(ConstraintViolationException exception) {
+        return problem(HttpStatus.BAD_REQUEST, "Invalid request", "Request parameters are invalid");
+    }
+
+    /** Returns a bad-request problem for malformed or unreadable HTTP input. */
+    @ExceptionHandler(ServerWebInputException.class)
+    public ResponseEntity<Problem> unreadableInput(ServerWebInputException exception) {
+        return problem(HttpStatus.BAD_REQUEST, "Invalid request", exception.getReason());
+    }
+
+    /** Returns service-unavailable when the relational database cannot complete an operation. */
+    @ExceptionHandler(DataAccessException.class)
+    public ResponseEntity<Problem> persistenceUnavailable(DataAccessException exception) {
+        return problem(HttpStatus.SERVICE_UNAVAILABLE, "Account storage unavailable",
+                "The account could not be persisted at this time");
     }
 
     /** Builds a response body and status for a problem detail. */

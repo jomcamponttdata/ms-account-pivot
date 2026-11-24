@@ -18,6 +18,7 @@ account:
   services:
     customer-url: ${CUSTOMER_SERVICE_URL:http://localhost:8081}
     transaction-url: ${TRANSACTION_SERVICE_URL:http://localhost:8084}
+    transaction-timeout-ms: ${ACCOUNT_TRANSACTION_TIMEOUT_MS:3000}
 server:
   port: ${ACCOUNT_SERVICE_PORT:8082}
 logging:

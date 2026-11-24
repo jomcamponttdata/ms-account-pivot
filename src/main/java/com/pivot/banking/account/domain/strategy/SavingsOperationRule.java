@@ -5,7 +5,6 @@ import com.pivot.banking.account.domain.Money;
 import com.pivot.banking.account.domain.MovementType;
 import com.pivot.banking.account.domain.exception.BusinessRuleViolationException;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 import java.time.YearMonth;
@@ -16,23 +15,22 @@ public class SavingsOperationRule implements AccountOperationRule {
 
     /** Rejects operations once the current month's movement allowance is exhausted. */
     @Override
-    public Mono<Void> validate(Account account, MovementType movementType, Money amount, LocalDate date) {
+    public void validate(Account account, MovementType movementType, Money amount, LocalDate date) {
         int count = YearMonth.from(date).equals(account.movementsPeriod())
                 ? account.movementsInCurrentMonth() : 0;
         if (count >= account.maxMonthlyMovements()) {
-            return Mono.error(new BusinessRuleViolationException("Monthly movement limit reached"));
+            throw new BusinessRuleViolationException("Monthly movement limit reached");
         }
-        return validateCurrencyAndFunds(account, movementType, amount);
+        validateCurrencyAndFunds(account, movementType, amount);
     }
 
     /** Enforces currency consistency and prevents withdrawals beyond the available balance. */
-    static Mono<Void> validateCurrencyAndFunds(Account account, MovementType movementType, Money amount) {
+    static void validateCurrencyAndFunds(Account account, MovementType movementType, Money amount) {
         if (!account.balance().currency().equals(amount.currency())) {
-            return Mono.error(new BusinessRuleViolationException("Operation currency must match account currency"));
+            throw new BusinessRuleViolationException("Operation currency must match account currency");
         }
         if (movementType == MovementType.WITHDRAWAL && !account.balance().isGreaterThanOrEqualTo(amount)) {
-            return Mono.error(new BusinessRuleViolationException("Insufficient account balance"));
+            throw new BusinessRuleViolationException("Insufficient account balance");
         }
-        return Mono.empty();
     }
 }

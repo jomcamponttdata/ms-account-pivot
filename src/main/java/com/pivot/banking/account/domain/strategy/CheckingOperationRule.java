@@ -4,7 +4,6 @@ import com.pivot.banking.account.domain.Account;
 import com.pivot.banking.account.domain.Money;
 import com.pivot.banking.account.domain.MovementType;
 import org.springframework.stereotype.Component;
-import reactor.core.publisher.Mono;
 
 import java.time.LocalDate;
 
@@ -14,7 +13,7 @@ public class CheckingOperationRule implements AccountOperationRule {
 
     /** Validates currency and ensures withdrawals do not overdraw the account. */
     @Override
-    public Mono<Void> validate(Account account, MovementType movementType, Money amount, LocalDate date) {
-        return SavingsOperationRule.validateCurrencyAndFunds(account, movementType, amount);
+    public void validate(Account account, MovementType movementType, Money amount, LocalDate date) {
+        SavingsOperationRule.validateCurrencyAndFunds(account, movementType, amount);
     }
 }
