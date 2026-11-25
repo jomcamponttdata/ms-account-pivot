@@ -5,8 +5,8 @@ import java.util.UUID;
 /** Signals that an account changed concurrently during an update. */
 public class ConcurrentModificationException extends RuntimeException {
 
-    /** Creates a concurrent-update exception for an account. */
-    public ConcurrentModificationException(UUID accountId) {
-        super("Account was modified concurrently: " + accountId);
-    }
+  /** Creates a concurrent-update exception for an account. */
+  public ConcurrentModificationException(UUID accountId) {
+    super("Account was modified concurrently: " + accountId);
+  }
 }

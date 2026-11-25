@@ -7,8 +7,8 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 @SpringBootApplication
 public class AccountServiceApplication {
 
-    /** Starts the account-service application. */
-    public static void main(String[] args) {
-        SpringApplication.run(AccountServiceApplication.class, args);
-    }
+  /** Starts the account-service application. */
+  public static void main(String[] args) {
+    SpringApplication.run(AccountServiceApplication.class, args);
+  }
 }

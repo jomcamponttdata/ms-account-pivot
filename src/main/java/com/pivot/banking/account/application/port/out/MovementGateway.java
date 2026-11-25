@@ -9,7 +9,11 @@ import io.reactivex.rxjava3.core.Single;
 /** Outbound client port for registering a movement in transaction-service. */
 public interface MovementGateway {
 
-    /** Registers the movement and reports definitive versus ambiguous downstream failures. */
-    Single<MovementReceipt> register(Account account, MovementType movementType, Money amount,
-                                     String description, String correlationId);
+  /** Registers the movement and reports definitive versus ambiguous downstream failures. */
+  Single<MovementReceipt> register(
+      Account account,
+      MovementType movementType,
+      Money amount,
+      String description,
+      String correlationId);
 }

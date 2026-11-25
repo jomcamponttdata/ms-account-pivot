@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS accounts (
     account_type VARCHAR(16) NOT NULL,
     currency VARCHAR(3) NOT NULL,
     balance NUMERIC(19, 2) NOT NULL DEFAULT 0,
+    minimum_daily_average NUMERIC(19, 2),
     maintenance_fee NUMERIC(19, 2),
     max_monthly_movements INTEGER,
     allowed_movement_day INTEGER,
@@ -26,6 +27,9 @@ CREATE TABLE IF NOT EXISTS accounts (
             AND max_monthly_movements IS NULL AND maintenance_fee IS NULL)
     )
 );
+
+-- schema.sql runs on every startup: add the optional column to databases created before it existed.
+ALTER TABLE accounts ADD COLUMN IF NOT EXISTS minimum_daily_average NUMERIC(19, 2);
 
 CREATE TABLE IF NOT EXISTS account_holders (
     id UUID PRIMARY KEY,
