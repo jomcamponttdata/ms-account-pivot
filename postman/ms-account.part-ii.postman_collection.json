@@ -1,0 +1,445 @@
+{
+  "info": {
+    "_postman_id": "e4f51523-9e5d-480a-ae74-79f47c812040",
+    "name": "ms-account - Part II",
+    "description": "Part II verification: profiles, opening amount, zero-fee PYME, transfers and excess movements. Requires customers/cards created by the prerequisite collections.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "01 - Reject opening amount below minimum",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Negative opening amount rejected', () => pm.expect(pm.response.code).to.be.oneOf([400,422]));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accountType\": \"SAVINGS\",\n  \"holders\": [\n    \"{{standardCustomerId}}\"\n  ],\n  \"currency\": \"PEN\",\n  \"maxMonthlyMovements\": 20,\n  \"openingAmount\": -1\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "02 - Open VIP savings with opening amount and daily average",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('VIP savings opened', () => pm.response.to.have.status(201));",
+              "const b=pm.response.json(); pm.test('Opening balance applied', () => pm.expect(b.balance).to.equal(100));",
+              "pm.environment.set('vipSavingsId', b.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accountType\": \"SAVINGS\",\n  \"holders\": [\n    \"{{vipCustomerId}}\"\n  ],\n  \"currency\": \"PEN\",\n  \"maxMonthlyMovements\": 2,\n  \"openingAmount\": 100,\n  \"minimumDailyAverage\": 50\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "03 - Open PYME checking with zero maintenance",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('PYME checking opened', () => pm.response.to.have.status(201));",
+              "const b=pm.response.json(); pm.test('Maintenance fee forced to zero', () => pm.expect(b.maintenanceFee).to.equal(0));",
+              "pm.environment.set('pymeCheckingId', b.id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accountType\": \"CHECKING\",\n  \"holders\": [\n    \"{{pymeCustomerId}}\"\n  ],\n  \"currency\": \"PEN\",\n  \"maintenanceFee\": 10,\n  \"openingAmount\": 200\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "04 - Open standard personal checking requires fee",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Standard checking opened as usual', () => pm.response.to.have.status(201));",
+              "pm.environment.set('standardCheckingId', pm.response.json().id);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"accountType\": \"CHECKING\",\n  \"holders\": [\n    \"{{standardCustomerId}}\"\n  ],\n  \"currency\": \"PEN\",\n  \"maintenanceFee\": 5\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "05 - Transfer between same customer accounts",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Same-customer transfer succeeds', () => pm.response.to.have.status(201));",
+              "const b=pm.response.json(); pm.test('Both movements share correlation', () => pm.expect(b.withdrawal.movementType).to.equal('WITHDRAWAL')); pm.expect(b.deposit.movementType).to.equal('DEPOSIT'); pm.expect(b.correlationId).to.be.a('string');",
+              "pm.environment.set('transferCorrelationId', b.correlationId);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts/transfers",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts",
+            "transfers"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sourceAccountId\": \"{{vipSavingsId}}\",\n  \"destinationAccountId\": \"{{standardCheckingId}}\",\n  \"amount\": 40,\n  \"description\": \"Part II same-customer transfer\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "06 - Transfer to third party account",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Third-party transfer succeeds', () => pm.response.to.have.status(201));",
+              "pm.environment.set('thirdPartyTransferCorrelationId', pm.response.json().correlationId);"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts/transfers",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts",
+            "transfers"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sourceAccountId\": \"{{vipSavingsId}}\",\n  \"destinationAccountId\": \"{{pymeCheckingId}}\",\n  \"amount\": 30,\n  \"description\": \"Part II third-party transfer\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "07 - Reject transfer with insufficient funds",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Insufficient balance rejected', () => pm.response.to.have.status(422));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts/transfers",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts",
+            "transfers"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"sourceAccountId\": \"{{vipSavingsId}}\",\n  \"destinationAccountId\": \"{{pymeCheckingId}}\",\n  \"amount\": 100000,\n  \"description\": \"Should fail\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "08 - Deposit beyond free quota accepted",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test('Excess deposit accepted', () => pm.expect(pm.response.code).to.be.oneOf([200,201]));"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          },
+          {
+            "key": "Accept",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/accounts/{{vipSavingsId}}/deposits",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "accounts",
+            "{{vipSavingsId}}",
+            "deposits"
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"amount\": 10,\n  \"currency\": \"PEN\",\n  \"description\": \"Beyond monthly quota\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "response": []
+    }
+  ],
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:8182"
+    },
+    {
+      "key": "vipCustomerId",
+      "value": ""
+    },
+    {
+      "key": "pymeCustomerId",
+      "value": ""
+    },
+    {
+      "key": "standardCustomerId",
+      "value": ""
+    },
+    {
+      "key": "vipSavingsId",
+      "value": ""
+    },
+    {
+      "key": "pymeCheckingId",
+      "value": ""
+    },
+    {
+      "key": "standardCheckingId",
+      "value": ""
+    },
+    {
+      "key": "transferCorrelationId",
+      "value": ""
+    },
+    {
+      "key": "thirdPartyTransferCorrelationId",
+      "value": ""
+    }
+  ]
+}

@@ -67,7 +67,17 @@ paths:
         - BUSINESS customer: no SAVINGS or FIXED_TERM; any number of CHECKING;
           one or more holders and zero or more authorized signers.
 
-        All accounts open with a zero balance. Conditional fields by account type:
+        Accounts open with a zero balance unless the optional `openingAmount` is supplied.
+        When omitted it defaults to zero; when supplied it must be at least the configured
+        minimum for the account product (default zero for every product). Its currency is
+        the account `currency` field, which defaults to PEN.
+
+        SAVINGS also accepts an optional `minimumDailyAverage`: a customer-defined minimum
+        daily-average balance for VIP personal savings. It defaults to zero when omitted,
+        must be nonnegative, and uses the account `currency`. Monthly verification is not
+        implemented yet: it requires a daily balance history that the account model does not
+        keep, so the value is stored but no rule is enforced against it.
+        Conditional fields by account type:
         - SAVINGS requires `maxMonthlyMovements`.
         - CHECKING requires `maintenanceFee`.
         - FIXED_TERM requires `allowedMovementDay`.
@@ -86,6 +96,7 @@ paths:
                     - 3fa85f64-5717-4562-b3fc-2c963f66afa6
                   currency: PEN
                   maxMonthlyMovements: 20
+                  minimumDailyAverage: 0.00
               checking:
                 summary: Business checking account
                 value:
@@ -263,6 +274,116 @@ paths:
           $ref: '#/components/responses/BusinessRuleViolation'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
+  /api/v1/accounts/transfers:
+    post:
+      tags: [Accounts]
+      operationId: transferBetweenAccounts
+      summary: Transfer money between two accounts of the same bank
+      description: |
+        Moves money from `sourceAccountId` to `destinationAccountId` as two movements
+        (WITHDRAWAL then DEPOSIT) that share one correlation id. Both accounts live in
+        ms-acount, so they may belong to the same customer or to different customers;
+        shared holders are not required. Both accounts must exist, be distinct, and use
+        the same currency as `amount`. The source balance must cover the amount plus any
+        excess-movement fee. Each side's excess fee is charged to its own balance and noted
+        in that side's downstream description.
+
+        Both balance updates are persisted in one local PostgreSQL transaction before the
+        movements are registered in ms-transaction. A confirmed downstream failure restores
+        both balances in one transaction. An ambiguous failure (timeout or circuit breaker)
+        does not compensate: the 503 detail carries the correlation id so the transfer can be
+        reconciled against ms-transaction.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TransferRequest'
+            examples:
+              sameCustomer:
+                summary: Transfer between two accounts of one customer
+                value:
+                  sourceAccountId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  destinationAccountId: 1a2b3c4d-5e6f-4789-8abc-0123456789de
+                  amount: 125.50
+                  currency: PEN
+                  description: Savings top-up
+              thirdParty:
+                summary: Transfer to an account held by another customer of the same bank
+                value:
+                  sourceAccountId: 3fa85f64-5717-4562-b3fc-2c963f66afa6
+                  destinationAccountId: 9f8e7d6c-5b4a-4321-9876-fedcba987654
+                  amount: 40.00
+                  currency: PEN
+                  description: Rent payment
+      responses:
+        '201':
+          description: Transfer registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransferReceipt'
+              example:
+                withdrawal:
+                  movementId: movement-101
+                  movementType: WITHDRAWAL
+                  amount: 125.50
+                  currency: PEN
+                  createdAt: '2026-01-05T10:15:30Z'
+                deposit:
+                  movementId: movement-102
+                  movementType: DEPOSIT
+                  amount: 125.50
+                  currency: PEN
+                  createdAt: '2026-01-05T10:15:31Z'
+                correlationId: transfer-request-123
+        '400':
+          description: Invalid request (validation errors)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Invalid request
+                status: 400
+                detail: 'amount: must be greater than or equal to 0.01'
+        '404':
+          description: Resource not found
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Resource not found
+                status: 404
+                detail: 'Account not found: 3fa85f64-5717-4562-b3fc-2c963f66afa6'
+        '422':
+          description: A business rule was violated
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Business rule violated
+                status: 422
+                detail: Transfer currency must match both account currencies
+        '503':
+          description: |
+            A dependent service failed. A confirmed failure triggers an attempt at local
+            compensation; an ambiguous failure carries the correlation id so the transfer
+            can be reconciled.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: about:blank
+                title: Dependent service unavailable
+                status: 503
+                detail: 'Movement registration outcome is ambiguous; correlationId=transfer-request-123'
 
 components:
   parameters:
@@ -372,6 +493,18 @@ components:
             format: uuid
         currency:
           $ref: '#/components/schemas/Currency'
+        openingAmount:
+          $ref: '#/components/schemas/Amount'
+          description: >-
+            Optional initial balance. Defaults to zero when omitted and must be at least
+            the configured minimum for this product. The currency is the account `currency`.
+        minimumDailyAverage:
+          $ref: '#/components/schemas/Amount'
+          description: >-
+            Optional customer-defined minimum daily-average balance for VIP personal savings.
+            Defaults to zero when omitted and must be nonnegative. The currency is the account
+            `currency`. Monthly verification is not implemented yet: it requires a daily balance
+            history that the account model does not keep, so the value is only stored, not enforced.
         maxMonthlyMovements:
           type: integer
           minimum: 1
@@ -398,6 +531,11 @@ components:
             $ref: '#/components/schemas/AuthorizedSigner'
         currency:
           $ref: '#/components/schemas/Currency'
+        openingAmount:
+          $ref: '#/components/schemas/Amount'
+          description: >-
+            Optional initial balance. Defaults to zero when omitted and must be at least
+            the configured minimum for this product. The currency is the account `currency`.
         maintenanceFee:
           $ref: '#/components/schemas/Amount'
     FixedTermAccountCreateRequest:
@@ -417,6 +555,11 @@ components:
             format: uuid
         currency:
           $ref: '#/components/schemas/Currency'
+        openingAmount:
+          $ref: '#/components/schemas/Amount'
+          description: >-
+            Optional initial balance. Defaults to zero when omitted and must be at least
+            the configured minimum for this product. The currency is the account `currency`.
         allowedMovementDay:
           type: integer
           minimum: 1
@@ -535,6 +678,39 @@ components:
         createdAt:
           type: string
           format: date-time
+    TransferRequest:
+      type: object
+      required: [sourceAccountId, destinationAccountId, amount]
+      additionalProperties: false
+      properties:
+        sourceAccountId:
+          type: string
+          format: uuid
+          description: Account debited by the transfer
+        destinationAccountId:
+          type: string
+          format: uuid
+          description: Account credited by the transfer
+        amount:
+          $ref: '#/components/schemas/PositiveAmount'
+        currency:
+          $ref: '#/components/schemas/Currency'
+        description:
+          type: string
+          maxLength: 200
+          example: Rent payment
+    TransferReceipt:
+      type: object
+      required: [withdrawal, deposit, correlationId]
+      properties:
+        withdrawal:
+          $ref: '#/components/schemas/MovementReceipt'
+        deposit:
+          $ref: '#/components/schemas/MovementReceipt'
+        correlationId:
+          type: string
+          description: Shared correlation id used for both downstream movements
+          example: transfer-request-123
     Balance:
       type: object
       required: [productId, productType, balance, currency]
